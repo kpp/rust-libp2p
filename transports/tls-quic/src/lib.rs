@@ -19,3 +19,4 @@
 // DEALINGS IN THE SOFTWARE.
 
 pub mod certificate;
+pub mod verifier;
