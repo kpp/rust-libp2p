@@ -18,7 +18,7 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-//! Certificate handling for libp2p
+//! X.509 certificate handling for libp2p
 //!
 //! This module handles generation, signing, and verification of certificates.
 
@@ -116,7 +116,7 @@ pub struct P2pCertificate<'a> {
 }
 
 /// Parse TLS certificate from DER input that includes a libp2p-specific
-/// certificate extension containing the public key of the given keypair.
+/// certificate extension containing a public key of a peer.
 pub fn parse_certificate(der_input: &[u8]) -> Result<P2pCertificate, X509Error> {
     let x509 = X509Certificate::from_der(der_input)
         .map(|(_rest_input, x509)| x509)
@@ -272,7 +272,7 @@ impl P2pCertificate<'_> {
 
     /// Return the signature scheme corresponding to [`AlgorithmIdentifier`]s
     /// of `subject_pki` and `signature_algorithm`
-    /// according to https://tools.ietf.org/id/draft-ietf-tls-tls13-21.html#rfc.section.4.2.3.
+    /// according to `<https://tools.ietf.org/id/draft-ietf-tls-tls13-21.html#rfc.section.4.2.3>`.
     pub fn signature_scheme(&self) -> Option<rustls::SignatureScheme> {
         // Certificates MUST use the NamedCurve encoding for elliptic curve parameters.
         // Endpoints MUST abort the connection attempt if it is not used.
