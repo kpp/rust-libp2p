@@ -1,12 +1,12 @@
 use libp2p_tls_quic::certificate;
 use libp2p_tls_quic::verifier;
 
-use quinn_proto::Connection as QuicConnection;
+use quinn_proto::{Connection as QuicConnection, Transmit as QuicTransmit};
 
 use std::sync::Arc;
 use std::net::UdpSocket;
 use std::time::Instant;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 //use quinn_proto::crypto::rustls::QUIC_CIPHER_SUITES;
 use rustls::{SupportedCipherSuite, 
@@ -105,6 +105,11 @@ fn main() {
     );
 
     let mut alive_connections = HashMap::<quinn_proto::ConnectionHandle, QuicConnection>::new();
+    let mut outbound = VecDeque::<QuicTransmit>::new();
+    let mut endpoint_events: Vec<(quinn_proto::ConnectionHandle, quinn_proto::EndpointEvent)> = vec![];
+    let mut connection_events = HashMap::<quinn_proto::ConnectionHandle, VecDeque::<quinn_proto::ConnectionEvent>>::new();
+
+    let mut timeout = None;
 
     let udp_socket = UdpSocket::bind("127.0.0.1:8383").unwrap();
     let local_ip = udp_socket.local_addr().ok().map(|addr| addr.ip());
@@ -117,92 +122,103 @@ fn main() {
         println!("\n\n============================ {}\n\n", iteration);
         iteration += 1;
 
-        //assert!(endpoint.poll_transmit().is_none());
-
         let (packet_len, packet_src) = udp_socket.recv_from(&mut socket_recv_buffer).unwrap();
         debug_assert!(packet_len <= socket_recv_buffer.len());
         let packet = From::from(&socket_recv_buffer[..packet_len]);
+        let now = Instant::now();
         // TODO: ECN bits aren't handled
-        let event = endpoint.handle(Instant::now(), packet_src, local_ip, None, packet).unwrap();
+        let event = endpoint.handle(now, packet_src, local_ip, None, packet).unwrap();
         match event {
             (connec_id, quinn_proto::DatagramEvent::ConnectionEvent(event)) => {
                 dbg!("connection event", connec_id.0);
-                let connection = alive_connections.get_mut(&connec_id).unwrap();
-
-                //dbg!(&event);
-                connection.handle_event(event);
-
-                loop {
-                    let mut had_events = false;
-
-                    while let Some(transmit) = connection.poll_transmit(Instant::now()) {
-                        dbg!("send data");
-                        let s = udp_socket.send_to(&transmit.contents, transmit.destination).unwrap();
-                        assert_eq!(s, transmit.contents.len());
-                    }
-
-                    while let Some(endpoint_event) = connection.poll_endpoint_events() {
-                        dbg!("endpoint_event");
-                        let connection_event = endpoint.handle_event(connec_id, endpoint_event);
-                        if let Some(connection_event) = connection_event {
-                            dbg!("connection_event");
-                            connection.handle_event(connection_event);
-                            had_events = true;
-                        }
-                    }
-
-                    while let Some(event) = connection.poll() {
-                        dbg!(event);
-                    }
-                    if !had_events {
-                        break;
-                    }
-                }
-
-                assert!(connection.poll_transmit(Instant::now()).is_none());
-                assert!(connection.poll_endpoint_events().is_none());
-                assert!(connection.poll().is_none());
-                assert!(connection.streams().accept(quinn_proto::Dir::Bi).is_none());
-                assert!(connection.streams().accept(quinn_proto::Dir::Uni).is_none());
+                connection_events.entry(connec_id)
+                    .or_insert_with(VecDeque::new)
+                    .push_back(event);
             },
-            (connec_id, quinn_proto::DatagramEvent::NewConnection(mut connection)) => {
-                dbg!("new connection");
-
-                loop {
-                    let mut had_events = false;
-
-                    while let Some(transmit) = connection.poll_transmit(Instant::now()) {
-                        dbg!("send data");
-                        let s = udp_socket.send_to(&transmit.contents, transmit.destination).unwrap();
-                        assert_eq!(s, transmit.contents.len());
-                    }
-
-                    while let Some(endpoint_event) = connection.poll_endpoint_events() {
-                        dbg!("endpoint_event");
-                        let connection_event = endpoint.handle_event(connec_id, endpoint_event);
-                        if let Some(connection_event) = connection_event {
-                            dbg!("connection_event");
-                            connection.handle_event(connection_event);
-                            had_events = true;
-                        }
-                    }
-
-                    while let Some(event) = connection.poll() {
-                        dbg!(event);
-                    }
-                    if !had_events {
-                        break;
-                    }
-                }
-
-                assert!(connection.poll_transmit(Instant::now()).is_none());
-                assert!(connection.poll_endpoint_events().is_none());
-                assert!(connection.poll().is_none());
-                assert!(connection.streams().accept(quinn_proto::Dir::Bi).is_none());
-                assert!(connection.streams().accept(quinn_proto::Dir::Uni).is_none());
-
+            (connec_id, quinn_proto::DatagramEvent::NewConnection(connection)) => {
+                dbg!("new connection", connec_id.0);
                 alive_connections.insert(connec_id, connection);
             },
         };
+
+        while let Some(transmit) = endpoint.poll_transmit() {
+            dbg!("push endpoint outbound");
+            outbound.push_back(transmit);
+        }
+
+        for (ch, connection) in alive_connections.iter_mut() {
+            if timeout.map_or(false, |x| x <= now) {
+                timeout = None;
+                connection.handle_timeout(now);
+            }
+
+            if let Some(events) = connection_events.get_mut(ch) {
+                for event in events.drain(..) {
+                    dbg!("connection_event");
+                    connection.handle_event(event);
+                }
+            }
+
+            while let Some(endpoint_event) = connection.poll_endpoint_events() {
+                dbg!("push endpoint_event");
+                endpoint_events.push((*ch, endpoint_event));
+            }
+
+            while let Some(transmit) = connection.poll_transmit(now) {
+                dbg!("push connection outbound");
+                outbound.push_back(transmit);
+            }
+
+            timeout = connection.poll_timeout();
+        }
+
+        for (ch, event) in endpoint_events.drain(..) {
+            let connection_event = endpoint.handle_event(ch, event);
+            if let Some(connection_event) = connection_event {
+                dbg!("connection_event from endpoint");
+                //dbg!(&connection_event);
+                if let Some(connection) = alive_connections.get_mut(&ch) {
+                    connection.handle_event(connection_event);
+                }
+            }
+        }
+
+        for transmit in outbound.drain(..) {
+            dbg!("send_data");
+            assert!(transmit.segment_size.is_none());
+            let s = udp_socket.send_to(&transmit.contents, transmit.destination).unwrap();
+            assert_eq!(s, transmit.contents.len());
+        }
+
+        let mut events = vec![];
+        for (ch, connection) in alive_connections.iter_mut() {
+            while let Some(event) = connection.poll() {
+                events.push((*ch, event));
+            }
+        }
+
+        for (ch, event) in events {
+            dbg!(&event);
+            use quinn_proto::Event::*;
+            match event {
+                HandshakeDataReady => {
+
+                },
+                Connected => {
+
+                },
+                ConnectionLost{reason} => {
+                    let _ = reason;
+                    alive_connections.remove(&ch);
+                    connection_events.remove(&ch);
+                },
+                Stream(_) => {
+
+                },
+                DatagramReceived => {
+
+                },
+            }
+        }
     }
 }
