@@ -68,6 +68,7 @@ impl rustls::ServerCertVerifier for Libp2pCertificateVerifier {
         _dns_name: webpki::DNSNameRef<'_>,
         _ocsp_response: &[u8],
     ) -> Result<ServerCertVerified, TLSError> {
+        dbg!("server cert: verify_server_cert");
         verify_certs(presented_certs).map(|_| ServerCertVerified::assertion())
     }
 
@@ -88,6 +89,7 @@ impl rustls::ServerCertVerifier for Libp2pCertificateVerifier {
         cert: &Certificate,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TLSError> {
+        dbg!("server cert: verify_tls13_signature");
         verify_tls13_signature(cert, dss.scheme, message, dss.sig.0.as_ref())
     }
 
@@ -113,6 +115,7 @@ impl rustls::ClientCertVerifier for Libp2pCertificateVerifier {
         presented_certs: &[Certificate],
         _dns_name: Option<&webpki::DNSName>,
     ) -> Result<ClientCertVerified, TLSError> {
+        dbg!("client cert: verify_client_cert");
         verify_certs(presented_certs).map(|_| ClientCertVerified::assertion())
     }
 
@@ -133,6 +136,7 @@ impl rustls::ClientCertVerifier for Libp2pCertificateVerifier {
         cert: &Certificate,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, TLSError> {
+        dbg!("client cert: verify_tls13_signature");
         verify_tls13_signature(cert, dss.scheme, message, dss.sig.0.as_ref())
     }
 
