@@ -73,7 +73,7 @@ fn main() {
     // according to the go implementation of libp2p-quic.
     transport.max_concurrent_uni_streams(42).unwrap();  // Can only panic if value is out of range.
     transport.max_concurrent_bidi_streams(42).unwrap();  // Can only panic if value is out of range.
-    //transport.datagram_receive_buffer_size(None);
+    transport.datagram_receive_buffer_size(None);
     //transport.keep_alive_interval(Some(core::time::Duration::from_millis(10)));
     let transport = Arc::new(transport);
 
@@ -107,9 +107,8 @@ fn main() {
     let mut alive_connections = HashMap::<quinn_proto::ConnectionHandle, QuicConnection>::new();
     let mut outbound = VecDeque::<QuicTransmit>::new();
     let mut endpoint_events: Vec<(quinn_proto::ConnectionHandle, quinn_proto::EndpointEvent)> = vec![];
-    let mut connection_events = HashMap::<quinn_proto::ConnectionHandle, VecDeque::<quinn_proto::ConnectionEvent>>::new();
-
-    let mut timeout = None;
+    let mut connection_events = VecDeque::<(quinn_proto::ConnectionHandle, quinn_proto::ConnectionEvent)>::new();
+    let mut timeouts = HashMap::<quinn_proto::ConnectionHandle, Instant>::new();
 
     let udp_socket = UdpSocket::bind("127.0.0.1:8383").unwrap();
     let local_ip = udp_socket.local_addr().ok().map(|addr| addr.ip());
@@ -125,15 +124,14 @@ fn main() {
         let (packet_len, packet_src) = udp_socket.recv_from(&mut socket_recv_buffer).unwrap();
         debug_assert!(packet_len <= socket_recv_buffer.len());
         let packet = From::from(&socket_recv_buffer[..packet_len]);
+
         let now = Instant::now();
         // TODO: ECN bits aren't handled
         let event = endpoint.handle(now, packet_src, local_ip, None, packet).unwrap();
         match event {
             (connec_id, quinn_proto::DatagramEvent::ConnectionEvent(event)) => {
                 dbg!("connection event", connec_id.0);
-                connection_events.entry(connec_id)
-                    .or_insert_with(VecDeque::new)
-                    .push_back(event);
+                connection_events.push_back((connec_id, event));
             },
             (connec_id, quinn_proto::DatagramEvent::NewConnection(connection)) => {
                 dbg!("new connection", connec_id.0);
@@ -146,17 +144,37 @@ fn main() {
             outbound.push_back(transmit);
         }
 
-        for (ch, connection) in alive_connections.iter_mut() {
-            if timeout.map_or(false, |x| x <= now) {
-                timeout = None;
-                connection.handle_timeout(now);
+        for (ch, event) in endpoint_events.drain(..) {
+            let connection_event = endpoint.handle_event(ch, event);
+            if let Some(connection_event) = connection_event {
+                dbg!("connection_event from endpoint");
+                connection_events.push_back((ch, connection_event));
             }
+        }
 
-            if let Some(events) = connection_events.get_mut(ch) {
-                for event in events.drain(..) {
-                    dbg!("connection_event");
-                    connection.handle_event(event);
+        for (ch, event) in connection_events.drain(..) {
+            if let Some(connection) = alive_connections.get_mut(&ch) {
+                connection.handle_event(event);
+            }
+        }
+
+        for (ch, connection) in alive_connections.iter_mut() {
+
+            loop {
+                while let Some(transmit) = connection.poll_transmit(now) {
+                    dbg!("push connection outbound");
+                    outbound.push_back(transmit);
                 }
+
+                if let Some(timeout) = timeouts.remove(ch) {
+                    if timeout <= now {
+                        connection.handle_timeout(now);
+                        continue;
+                    } else {
+                        timeouts.insert(*ch, timeout);
+                    }
+                }
+                break;
             }
 
             while let Some(endpoint_event) = connection.poll_endpoint_events() {
@@ -164,22 +182,8 @@ fn main() {
                 endpoint_events.push((*ch, endpoint_event));
             }
 
-            while let Some(transmit) = connection.poll_transmit(now) {
-                dbg!("push connection outbound");
-                outbound.push_back(transmit);
-            }
-
-            timeout = connection.poll_timeout();
-        }
-
-        for (ch, event) in endpoint_events.drain(..) {
-            let connection_event = endpoint.handle_event(ch, event);
-            if let Some(connection_event) = connection_event {
-                dbg!("connection_event from endpoint");
-                //dbg!(&connection_event);
-                if let Some(connection) = alive_connections.get_mut(&ch) {
-                    connection.handle_event(connection_event);
-                }
+            if let Some(timeout) = connection.poll_timeout() {
+                timeouts.insert(*ch, timeout);
             }
         }
 
@@ -192,6 +196,8 @@ fn main() {
 
         let mut events = vec![];
         for (ch, connection) in alive_connections.iter_mut() {
+            assert!(connection.poll_endpoint_events().is_none());
+            assert!(connection.poll_transmit(Instant::now()).is_none());
             while let Some(event) = connection.poll() {
                 events.push((*ch, event));
             }
@@ -210,10 +216,10 @@ fn main() {
                 ConnectionLost{reason} => {
                     let _ = reason;
                     alive_connections.remove(&ch);
-                    connection_events.remove(&ch);
+                    timeouts.remove(&ch);
                 },
                 Stream(_) => {
-
+                    panic!("stream");
                 },
                 DatagramReceived => {
 
