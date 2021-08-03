@@ -72,8 +72,8 @@ pub fn make_certificate(
         // into the SignedKey data structure, which is carried
         // in the libp2p Public Key Extension.
         // SignedKey ::= SEQUENCE {
-        //    publicKey BIT STRING,
-        //    signature BIT STRING
+        //    publicKey OCTET STRING,
+        //    signature OCTET STRING
         // }
         let extension_content = {
             let serialized_pubkey = keypair.public().to_protobuf_encoding();
@@ -145,8 +145,8 @@ pub fn parse_certificate(der_input: &[u8]) -> Result<P2pCertificate, X509Error> 
             // into the SignedKey data structure, which is carried
             // in the libp2p Public Key Extension.
             // SignedKey ::= SEQUENCE {
-            //    publicKey BIT STRING,
-            //    signature BIT STRING
+            //    publicKey OCTET STRING,
+            //    signature OCTET STRING
             // }
             let (public_key, signature): (Vec<u8>, Vec<u8>) = yasna::decode_der(ext.value)
                 .map_err(|_| X509Error::InvalidUserCertificate)?;
