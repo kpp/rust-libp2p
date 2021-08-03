@@ -134,13 +134,13 @@ pub fn parse_certificate(der_input: &[u8]) -> Result<P2pCertificate, X509Error> 
 
     let mut libp2p_extension = None;
 
-    for (oid, ext) in x509.extensions() {
-        if oid == &p2p_ext_oid && libp2p_extension.is_some() {
+    for ext in x509.extensions() {
+        if ext.oid == p2p_ext_oid && libp2p_extension.is_some() {
             // The extension was already parsed
             return Err(X509Error::DuplicateExtensions)
         }
 
-        if oid == &p2p_ext_oid {
+        if ext.oid == p2p_ext_oid {
             // The public host key and the signature are ANS.1-encoded
             // into the SignedKey data structure, which is carried
             // in the libp2p Public Key Extension.
@@ -224,37 +224,7 @@ impl P2pCertificate<'_> {
             return false
         }
 
-        // Dump PKI in the DER format:
-        // SubjectPublicKeyInfo ::= SEQUENCE {
-        //    algorithm             AlgorithmIdentifier,
-        //    subject_public_key    BIT STRING
-        // }
-        // AlgorithmIdentifier  ::=  SEQUENCE  {
-        //    algorithm               OBJECT IDENTIFIER,
-        //    parameters              ANY DEFINED BY algorithm OPTIONAL
-        // }
-        let pki = &self.certificate.tbs_certificate.subject_pki;
-        let algo_oid = if let Some(algo_oid) = pki.algorithm.algorithm.iter() {
-            yasna::models::ObjectIdentifier::new(algo_oid.collect())
-        } else {
-            return false;
-        };
-        let params_der = match pki.algorithm.parameters.as_ref().map(der_parser::ber::BerObject::to_vec) {
-            Some(Ok(der)) => Some(der),
-            Some(Err(_)) => return false,
-            _ => None
-        };
-        let subject_pki = yasna::construct_der(|writer| {
-            writer.write_sequence(|writer| {
-                writer.next().write_sequence(|writer| {
-                    writer.next().write_oid(&algo_oid);
-                    if let Some(params_der) = params_der {
-                        writer.next().write_der(&params_der);
-                    }
-                });
-                writer.next().write_bitvec_bytes(&pki.subject_public_key.data, pki.subject_public_key.data.len() * 8);
-            })
-        });
+        let subject_pki = self.certificate.public_key().raw;
 
         // The peer signs the concatenation of the string `libp2p-tls-handshake:`
         // and the public key that it used to generate the certificate carrying
