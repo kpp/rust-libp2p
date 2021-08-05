@@ -151,7 +151,7 @@ fn verify_certs(presented_certs: &[Certificate]) -> Result<(), TLSError> {
     if presented_certs.len() != 1 {
         return Err(TLSError::NoCertificatesPresented);
     }
-    let certificate = crate::certificate::parse_certificate(presented_certs[0].as_ref())
+    let certificate = crate::x509::certificate::parse_certificate(presented_certs[0].as_ref())
         .map_err(|_| {
             // There are multiple reasons for it:
             // - Invalid DER
@@ -186,7 +186,7 @@ fn verify_tls13_signature(
     message: &[u8],
     signature: &[u8],
 ) -> Result<HandshakeSignatureValid, TLSError> {
-    let certificate = crate::certificate::parse_certificate(cert.as_ref())
+    let certificate = crate::x509::certificate::parse_certificate(cert.as_ref())
         .map_err(|_| {
             // There are multiple reasons for it:
             // - Invalid DER
