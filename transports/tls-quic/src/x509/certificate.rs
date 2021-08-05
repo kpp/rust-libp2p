@@ -405,7 +405,7 @@ impl P2pCertificate<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::certificate;
+    use crate::x509::certificate;
     #[test]
     fn sanity_check() {
         let keypair = libp2p_core::identity::Keypair::generate_ed25519();
