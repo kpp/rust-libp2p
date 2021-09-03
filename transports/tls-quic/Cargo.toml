@@ -20,3 +20,4 @@ yasna = "0.4.0"
 rustls = { version = "0.19.1", features = ["dangerous_configuration"] }
 ring = "0.16.20"
 webpki = "0.21.0"
+quinn-proto = "*"

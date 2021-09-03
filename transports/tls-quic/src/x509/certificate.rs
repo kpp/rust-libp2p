@@ -81,7 +81,9 @@ pub fn make_certificate(
         };
 
         // This extension MAY be marked critical.
-        rcgen::CustomExtension::from_oid_content(&P2P_EXT_OID, extension_content)
+        let mut ext = rcgen::CustomExtension::from_oid_content(&P2P_EXT_OID, extension_content);
+        ext.set_criticality(true);
+        ext
     };
 
     let certificate = {
