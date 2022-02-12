@@ -3,6 +3,7 @@ use async_trait::async_trait;
 use futures::future::FutureExt;
 use futures::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use futures::stream::StreamExt;
+use futures::task::Spawn;
 use libp2p::core::upgrade;
 use libp2p::request_response::{
     ProtocolName, ProtocolSupport, RequestResponse, RequestResponseCodec, RequestResponseConfig,
@@ -11,6 +12,8 @@ use libp2p::request_response::{
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p_quic::QuicConfig;
 use rand::RngCore;
+use std::num::NonZeroU8;
+use std::time::Duration;
 use std::{io, iter};
 
 fn generate_tls_keypair() -> libp2p::identity::Keypair {
@@ -23,7 +26,7 @@ async fn create_swarm(keylog: bool) -> Result<Swarm<RequestResponse<PingCodec>>>
     let mut transport = QuicConfig::new(keypair);
     transport
         .transport
-        .max_idle_timeout(Some(quinn_proto::VarInt::from_u32(1_000u32).into()));
+        .max_idle_timeout(Some(quinn_proto::VarInt::from_u32(60_000u32).into()));
     if keylog {
         transport.enable_keylogger();
     }
@@ -33,7 +36,8 @@ async fn create_swarm(keylog: bool) -> Result<Swarm<RequestResponse<PingCodec>>>
         .boxed();
 
     let protocols = iter::once((PingProtocol(), ProtocolSupport::Full));
-    let cfg = RequestResponseConfig::default();
+    let mut cfg = RequestResponseConfig::default();
+    cfg.set_connection_keep_alive(Duration::from_secs(60));
     let behaviour = RequestResponse::new(PingCodec(), protocols, cfg);
     tracing::info!("{}", peer_id);
     Ok(Swarm::new(transport, behaviour, peer_id))
@@ -285,4 +289,119 @@ async fn dial_failure() -> Result<()> {
     };
 
     Ok(())
+}
+
+#[test]
+fn concurrent_connections_and_streams() {
+    use futures::executor::block_on;
+    use quickcheck::*;
+
+    tracing_subscriber::fmt::init();
+
+    fn prop(number_listeners: NonZeroU8, number_streams: NonZeroU8) -> TestResult {
+        let (number_listeners, number_streams): (u8, u8) =
+            (number_listeners.into(), number_streams.into());
+        if number_listeners > 20 || number_streams > 20 {
+            return TestResult::discard();
+        }
+
+        let mut pool = futures::executor::LocalPool::default();
+        let mut data = vec![0; 4096 * 10];
+        rand::thread_rng().fill_bytes(&mut data);
+        let mut listeners = vec![];
+
+        // Spawn the listener nodes.
+        for _ in 0..number_listeners {
+            let mut listener = block_on(create_swarm(true)).unwrap();
+            Swarm::listen_on(&mut listener, "/ip4/127.0.0.1/udp/0/quic".parse().unwrap()).unwrap();
+
+            // Wait to listen on address.
+            let addr = match block_on(listener.next()) {
+                Some(SwarmEvent::NewListenAddr { address, .. }) => address,
+                e => panic!("{:?}", e),
+            };
+
+            listeners.push((*listener.local_peer_id(), addr));
+
+            pool.spawner()
+                .spawn_obj(
+                    async move {
+                        loop {
+                            match listener.next().await {
+                                Some(SwarmEvent::ConnectionEstablished { .. }) => {}
+                                Some(SwarmEvent::IncomingConnection { .. }) => {}
+                                Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
+                                    message:
+                                        RequestResponseMessage::Request {
+                                            request: Ping(ping),
+                                            channel,
+                                            ..
+                                        },
+                                    ..
+                                })) => {
+                                    listener
+                                        .behaviour_mut()
+                                        .send_response(channel, Pong(ping))
+                                        .unwrap();
+                                }
+                                Some(SwarmEvent::Behaviour(
+                                    RequestResponseEvent::ResponseSent { .. },
+                                )) => {}
+                                Some(SwarmEvent::ConnectionClosed { .. }) => {}
+                                e => panic!("{:?}", e),
+                            }
+                        }
+                    }
+                    .boxed()
+                    .into(),
+                )
+                .unwrap();
+        }
+
+        let mut dialer = block_on(create_swarm(true)).unwrap();
+
+        // For each listener node start `number_streams` requests.
+        for (listener_peer_id, listener_addr) in listeners {
+            dialer
+                .behaviour_mut()
+                .add_address(&listener_peer_id, listener_addr);
+
+            for _ in 0..number_streams {
+                dialer
+                    .behaviour_mut()
+                    .send_request(&listener_peer_id, Ping(data.clone()));
+            }
+        }
+
+        // Wait for responses to each request.
+        pool.run_until(async {
+            let mut num_responses = 0;
+            loop {
+                match dialer.next().await {
+                    Some(SwarmEvent::Dialing(_)) => {}
+                    Some(SwarmEvent::ConnectionEstablished { .. }) => {}
+                    Some(SwarmEvent::Behaviour(RequestResponseEvent::Message {
+                        message:
+                            RequestResponseMessage::Response {
+                                response: Pong(pong),
+                                ..
+                            },
+                        ..
+                    })) => {
+                        num_responses += 1;
+                        assert_eq!(data, pong);
+                        if num_responses == number_listeners as usize * number_streams as usize {
+                            break;
+                        }
+                    }
+                    Some(SwarmEvent::ConnectionClosed { .. }) => {}
+                    e => panic!("{:?}", e),
+                }
+            }
+        });
+
+        TestResult::passed()
+    }
+
+    QuickCheck::new().quickcheck(prop as fn(_, _) -> _);
 }
