@@ -26,8 +26,8 @@ use crate::{
     connection::ConnectedPoint,
     muxing::{StreamMuxer, StreamMuxerBox},
     transport::{
-        and_then::AndThen, boxed::boxed, timeout::TransportTimeout, ListenerEvent, Transport,
-        TransportError,
+        and_then::AndThen, boxed::boxed, timeout::TransportTimeout, ListenerId, Transport,
+        TransportError, TransportEvent,
     },
     upgrade::{
         self, apply_inbound, apply_outbound, InboundUpgrade, InboundUpgradeApply, OutboundUpgrade,
@@ -287,16 +287,16 @@ where
 /// A authenticated and multiplexed transport, obtained from
 /// [`Authenticated::multiplex`].
 #[derive(Clone)]
-pub struct Multiplexed<T>(T);
+#[pin_project::pin_project]
+pub struct Multiplexed<T>(#[pin] T);
 
 impl<T> Multiplexed<T> {
     /// Boxes the authenticated, multiplexed transport, including
     /// the [`StreamMuxer`] and custom transport errors.
     pub fn boxed<M>(self) -> super::Boxed<(PeerId, StreamMuxerBox)>
     where
-        T: Transport<Output = (PeerId, M)> + Sized + Send + 'static,
+        T: Transport<Output = (PeerId, M)> + Sized + Send + Unpin + 'static,
         T::Dial: Send + 'static,
-        T::Listener: Send + 'static,
         T::ListenerUpgrade: Send + 'static,
         T::Error: Send + Sync,
         M: StreamMuxer + Send + Sync + 'static,
@@ -331,12 +331,15 @@ where
 {
     type Output = T::Output;
     type Error = T::Error;
-    type Listener = T::Listener;
     type ListenerUpgrade = T::ListenerUpgrade;
     type Dial = T::Dial;
 
     fn dial(&mut self, addr: Multiaddr) -> Result<Self::Dial, TransportError<Self::Error>> {
         self.0.dial(addr)
+    }
+
+    fn remove_listener(&mut self, id: ListenerId) -> bool {
+        self.0.remove_listener(id)
     }
 
     fn dial_as_listener(
@@ -346,15 +349,19 @@ where
         self.0.dial_as_listener(addr)
     }
 
-    fn listen_on(
-        &mut self,
-        addr: Multiaddr,
-    ) -> Result<Self::Listener, TransportError<Self::Error>> {
+    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
         self.0.listen_on(addr)
     }
 
     fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
         self.0.address_translation(server, observed)
+    }
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
+        self.project().0.poll(cx)
     }
 }
 
@@ -365,7 +372,9 @@ type EitherUpgrade<C, U> = future::Either<InboundUpgradeApply<C, U>, OutboundUpg
 ///
 /// See [`Transport::upgrade`]
 #[derive(Debug, Copy, Clone)]
+#[pin_project::pin_project]
 pub struct Upgrade<T, U> {
+    #[pin]
     inner: T,
     upgrade: U,
 }
@@ -387,7 +396,6 @@ where
 {
     type Output = (PeerId, D);
     type Error = TransportUpgradeError<T::Error, E>;
-    type Listener = ListenerStream<T::Listener, U>;
     type ListenerUpgrade = ListenerUpgradeFuture<T::ListenerUpgrade, U, C>;
     type Dial = DialUpgradeFuture<T::Dial, U, C>;
 
@@ -400,6 +408,10 @@ where
             future: Box::pin(future),
             upgrade: future::Either::Left(Some(self.upgrade.clone())),
         })
+    }
+
+    fn remove_listener(&mut self, id: ListenerId) -> bool {
+        self.inner.remove_listener(id)
     }
 
     fn dial_as_listener(
@@ -416,22 +428,30 @@ where
         })
     }
 
-    fn listen_on(
-        &mut self,
-        addr: Multiaddr,
-    ) -> Result<Self::Listener, TransportError<Self::Error>> {
-        let stream = self
-            .inner
+    fn listen_on(&mut self, addr: Multiaddr) -> Result<ListenerId, TransportError<Self::Error>> {
+        self.inner
             .listen_on(addr)
-            .map_err(|err| err.map(TransportUpgradeError::Transport))?;
-        Ok(ListenerStream {
-            stream: Box::pin(stream),
-            upgrade: self.upgrade.clone(),
-        })
+            .map_err(|err| err.map(TransportUpgradeError::Transport))
     }
 
     fn address_translation(&self, server: &Multiaddr, observed: &Multiaddr) -> Option<Multiaddr> {
         self.inner.address_translation(server, observed)
+    }
+
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<TransportEvent<Self::ListenerUpgrade, Self::Error>> {
+        let this = self.project();
+        let upgrade = this.upgrade.clone();
+        this.inner.poll(cx).map(|event| {
+            event
+                .map_upgrade(move |future| ListenerUpgradeFuture {
+                    future: Box::pin(future),
+                    upgrade: future::Either::Left(Some(upgrade)),
+                })
+                .map_err(TransportUpgradeError::Transport)
+        })
     }
 }
 
@@ -531,43 +551,6 @@ where
     C: AsyncRead + AsyncWrite + Unpin,
 {
 }
-
-/// The [`Transport::Listener`] stream of an [`Upgrade`]d transport.
-pub struct ListenerStream<S, U> {
-    stream: Pin<Box<S>>,
-    upgrade: U,
-}
-
-impl<S, U, F, C, D, E> Stream for ListenerStream<S, U>
-where
-    S: TryStream<Ok = ListenerEvent<F, E>, Error = E>,
-    F: TryFuture<Ok = (PeerId, C)>,
-    C: AsyncRead + AsyncWrite + Unpin,
-    U: InboundUpgrade<Negotiated<C>, Output = D> + Clone,
-{
-    type Item = Result<
-        ListenerEvent<ListenerUpgradeFuture<F, U, C>, TransportUpgradeError<E, U::Error>>,
-        TransportUpgradeError<E, U::Error>,
-    >;
-
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        match ready!(TryStream::try_poll_next(self.stream.as_mut(), cx)) {
-            Some(Ok(event)) => {
-                let event = event
-                    .map(move |future| ListenerUpgradeFuture {
-                        future: Box::pin(future),
-                        upgrade: future::Either::Left(Some(self.upgrade.clone())),
-                    })
-                    .map_err(TransportUpgradeError::Transport);
-                Poll::Ready(Some(Ok(event)))
-            }
-            Some(Err(err)) => Poll::Ready(Some(Err(TransportUpgradeError::Transport(err)))),
-            None => Poll::Ready(None),
-        }
-    }
-}
-
-impl<S, U> Unpin for ListenerStream<S, U> {}
 
 /// The [`Transport::ListenerUpgrade`] future of an [`Upgrade`]d transport.
 pub struct ListenerUpgradeFuture<F, U, C>
