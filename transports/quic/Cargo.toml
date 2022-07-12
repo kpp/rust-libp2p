@@ -21,7 +21,7 @@ rustls = { version = "0.20.2", default-features = false, features = ["dangerous_
 thiserror = "1.0.26"
 tracing = "0.1.30"
 webpki = "0.22.0"
-x509-parser = "0.13.0"
+x509-parser = "0.14.0"
 yasna = "0.5.0"
 
 [dev-dependencies]
