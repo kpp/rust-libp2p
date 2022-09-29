@@ -29,6 +29,7 @@
 - [`libp2p-uds` CHANGELOG](transports/uds/CHANGELOG.md)
 - [`libp2p-wasm-ext` CHANGELOG](transports/wasm-ext/CHANGELOG.md)
 - [`libp2p-websocket` CHANGELOG](transports/websocket/CHANGELOG.md)
+- [`libp2p-tls` CHANGELOG](transports/tls/CHANGELOG.md)
 
 ## Multiplexers
 
@@ -45,7 +46,17 @@
 
 # 0.49.0 - [unreleased]
 
+- Update to [`libp2p-core` `v0.36.1`](core/CHANGELOG.md#0361).
+
 - Update to [`libp2p-tcp` `v0.37.0`](transports/tcp/CHANGELOG.md#0370).
+- Update individual crates.
+    - Update to [`libp2p-ping` `v0.39.1`](protocols/ping/CHANGELOG.md#0391).
+    - Update to [`libp2p-floodsub` `v0.39.1`](protocols/floodsub/CHANGELOG.md#0391).
+    - Update to [`libp2p-gossipsub` `v0.41.1`](protocols/gossipsub/CHANGELOG.md#0411).
+    - Update to [`libp2p-request-response` `v0.21.1`](protocols/request-response/CHANGELOG.md#0211).
+    - Update to [`libp2p-pnet` `v0.22.1`](transports/pnet/CHANGELOG.md#0221).
+    - Update to [`libp2p-mplex` `v0.36.1`](muxers/mplex/CHANGELOG.md#0361).
+    - Update to [`libp2p-swarm` `v0.39.1`](swarm/CHANGELOG.md#0391).
 - 
 - Update to [`libp2p-noise` `v0.39.1`](transports/noise/CHANGELOG.md#0391).
 
@@ -56,6 +67,10 @@
 - Update to [`libp2p-kad` `v0.41.0`](protocols/kad/CHANGELOG.md#0410).
 
 - Update to [`libp2p-noise` `v0.39.1`](transports/noise/CHANGELOG.md#0391).
+
+- Update to [`libp2p-swarm` `v0.39.1`](swarm/CHANGELOG.md#0391).
+
+- Introduce [`libp2p-tls` `v0.1.0`](transports/tls/CHANGELOG.md#010).
 
 # 0.48.0
 
