@@ -19,7 +19,7 @@ use std::{
 use futures::{stream::SelectAll, AsyncRead, AsyncWrite, Stream, StreamExt};
 
 mod in_addr;
-mod tls;
+use libp2p_tls as tls;
 
 use in_addr::InAddr;
 
@@ -159,10 +159,9 @@ impl QuicUpgrade {
         let end_entity = certificates
             .get(0)
             .expect("there should be exactly one certificate; qed");
-        let end_entity_der = end_entity.as_ref();
-        let p2p_cert = crate::tls::certificate::parse_certificate(end_entity_der)
+        let p2p_cert = crate::tls::certificate::parse(end_entity)
             .expect("the certificate was validated during TLS handshake; qed");
-        PeerId::from_public_key(&p2p_cert.extension.public_key)
+        p2p_cert.peer_id()
     }
 }
 
@@ -203,15 +202,15 @@ pub struct Config {
 
 impl Config {
     /// Creates a new configuration object with default values.
-    pub fn new(keypair: &Keypair) -> Result<Self, tls::ConfigError> {
+    pub fn new(keypair: &Keypair) -> Result<Self, tls::certificate::GenError> {
         let mut transport = quinn::TransportConfig::default();
         transport.max_concurrent_uni_streams(0u32.into()); // Can only panic if value is out of range.
         transport.datagram_receive_buffer_size(None);
         transport.keep_alive_interval(Some(Duration::from_millis(10)));
         let transport = Arc::new(transport);
 
-        let client_tls_config = tls::make_client_config(keypair).unwrap();
-        let server_tls_config = tls::make_server_config(keypair).unwrap();
+        let client_tls_config = tls::make_client_config(keypair, None)?; // TODO set client peer ID
+        let server_tls_config = tls::make_server_config(keypair)?;
 
         let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(server_tls_config));
         server_config.transport = Arc::clone(&transport);
