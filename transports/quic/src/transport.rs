@@ -28,20 +28,18 @@ use crate::provider::Provider;
 use crate::{endpoint, muxer::Muxer, upgrade::Connecting};
 
 use futures::channel::{mpsc, oneshot};
-use futures::future::{BoxFuture, MapErr};
+use futures::future::BoxFuture;
 use futures::ready;
 use futures::stream::StreamExt;
 use futures::{prelude::*, stream::SelectAll};
 
 use if_watch::{IfEvent, IfWatcher};
 
-use futures::channel::oneshot::{Canceled, Receiver};
 use libp2p_core::{
     multiaddr::{Multiaddr, Protocol},
     transport::{ListenerId, TransportError as CoreTransportError, TransportEvent},
     PeerId, Transport,
 };
-use quinn_proto::ConnectError;
 use rand::prelude::SliceRandom;
 use rand::thread_rng;
 use std::collections::hash_map::Entry;
@@ -169,7 +167,9 @@ impl<P: Provider> Transport for GenTransport<P> {
 
         // Try to use pick a random listener to use for dialing.
         let dialing = match listeners.choose_mut(&mut thread_rng()) {
-            Some(listener) => listener.dialer_state.new_dial(socket_addr),
+            Some(listener) => listener
+                .dialer_state
+                .new_dial(socket_addr, self.handshake_timeout),
             None => {
                 // No listener? Get or create an explicit dialer.
 
@@ -181,16 +181,11 @@ impl<P: Provider> Transport for GenTransport<P> {
                     }
                 };
 
-                dialer.state.new_dial(socket_addr)
+                dialer.state.new_dial(socket_addr, self.handshake_timeout)
             }
         };
-        let handshake_timeout = self.handshake_timeout;
-        Ok(async move {
-            let connection = dialing.await??;
-            let final_connec = Connecting::from_connection(connection, handshake_timeout).await?;
-            Ok(final_connec)
-        }
-        .boxed())
+
+        Ok(dialing)
     }
 
     fn dial_as_listener(
@@ -273,7 +268,8 @@ impl DialerState {
     fn new_dial(
         &mut self,
         address: SocketAddr,
-    ) -> MapErr<Receiver<Result<Connection, ConnectError>>, fn(Canceled) -> TransportError> {
+        timeout: Duration,
+    ) -> BoxFuture<'static, Result<(PeerId, Muxer), TransportError>> {
         let (rx, tx) = oneshot::channel();
 
         let message = ToEndpoint::Dial {
@@ -287,8 +283,16 @@ impl DialerState {
             waker.wake();
         }
 
-        // Our oneshot getting dropped means the message didn't make it to the endpoint driver.
-        tx.map_err(|_| TransportError::EndpointDriverCrashed)
+        async move {
+            // Our oneshot getting dropped means the message didn't make it to the endpoint driver.
+            let connection = tx
+                .await
+                .map_err(|_| TransportError::EndpointDriverCrashed)??;
+            let (peer, muxer) = Connecting::from_connection(connection, timeout).await?;
+
+            Ok((peer, muxer))
+        }
+        .boxed()
     }
 
     /// Send all pending dials into the given [`endpoint::Channel`].
