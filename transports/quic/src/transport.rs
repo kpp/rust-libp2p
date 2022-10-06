@@ -22,10 +22,10 @@
 //!
 //! Combines all the objects in the other modules to implement the trait.
 
-use crate::connection::{Connection, ConnectionError};
-use crate::endpoint::{Config, QuinnConfig, ToEndpoint};
+use crate::endpoint::{QuinnConfig, ToEndpoint};
 use crate::provider::Provider;
-use crate::{endpoint, muxer::Muxer, upgrade::Connecting};
+use crate::Config;
+use crate::{connection, endpoint, Connection};
 
 use futures::channel::{mpsc, oneshot};
 use futures::future::BoxFuture;
@@ -35,6 +35,7 @@ use futures::{prelude::*, stream::SelectAll};
 
 use if_watch::{IfEvent, IfWatcher};
 
+use crate::connection::Connecting;
 use libp2p_core::{
     multiaddr::{Multiaddr, Protocol},
     transport::{ListenerId, TransportError as CoreTransportError, TransportEvent},
@@ -88,7 +89,7 @@ pub enum TransportError {
     Reach(#[from] quinn_proto::ConnectError),
     /// Error after the remote has been reached.
     #[error(transparent)]
-    Established(#[from] ConnectionError),
+    Established(#[from] connection::Error),
 
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -102,7 +103,7 @@ pub enum TransportError {
 }
 
 impl<P: Provider> Transport for GenTransport<P> {
-    type Output = (PeerId, Muxer);
+    type Output = (PeerId, Connection);
     type Error = TransportError;
     type ListenerUpgrade = Connecting;
     type Dial = BoxFuture<'static, Result<Self::Output, Self::Error>>;
@@ -269,7 +270,7 @@ impl DialerState {
         &mut self,
         address: SocketAddr,
         timeout: Duration,
-    ) -> BoxFuture<'static, Result<(PeerId, Muxer), TransportError>> {
+    ) -> BoxFuture<'static, Result<(PeerId, Connection), TransportError>> {
         let (rx, tx) = oneshot::channel();
 
         let message = ToEndpoint::Dial {
@@ -288,7 +289,7 @@ impl DialerState {
             let connection = tx
                 .await
                 .map_err(|_| TransportError::EndpointDriverCrashed)??;
-            let (peer, muxer) = Connecting::from_connection(connection, timeout).await?;
+            let (peer, muxer) = Connecting::new(connection, timeout).await?;
 
             Ok((peer, muxer))
         }
@@ -327,7 +328,7 @@ struct Listener {
     listener_id: ListenerId,
 
     /// Channel where new connections are being sent.
-    new_connections_rx: mpsc::Receiver<Connection>,
+    new_connections_rx: mpsc::Receiver<connection::State>,
     handshake_timeout: Duration,
 
     if_watcher: Option<IfWatcher>,
@@ -471,7 +472,7 @@ impl Stream for Listener {
                     let local_addr = socketaddr_to_multiaddr(connection.local_addr());
                     let send_back_addr = socketaddr_to_multiaddr(&connection.remote_addr());
                     let event = TransportEvent::Incoming {
-                        upgrade: Connecting::from_connection(connection, self.handshake_timeout),
+                        upgrade: Connecting::new(connection, self.handshake_timeout),
                         local_addr,
                         send_back_addr,
                         listener_id: self.listener_id,

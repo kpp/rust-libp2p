@@ -18,67 +18,59 @@
 // FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 // DEALINGS IN THE SOFTWARE.
 
-//! Future that drives a QUIC connection until is has performed its TLS handshake.
-
-use crate::{
-    connection::{Connection, ConnectionEvent},
-    muxer::Muxer,
-    transport,
-};
-
-use futures::prelude::*;
+use crate::Connection;
+use crate::{connection::Event, connection::State, transport};
+use futures::{prelude::*};
 use futures_timer::Delay;
 use libp2p_core::PeerId;
 use std::{
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
+use std::time::Duration;
 
-/// A QUIC connection currently being negotiated.
+/// Future that drives a QUIC connection until is has performed its TLS handshake.
 #[derive(Debug)]
 pub struct Connecting {
-    connection: Option<Connection>,
+    state: Option<State>,
     timeout: Delay,
 }
 
 impl Connecting {
-    /// Builds an [`Connecting`] that wraps around a [`Connection`].
-    pub(crate) fn from_connection(connection: Connection, timeout: Duration) -> Self {
+    pub(crate) fn new(state: State, timeout: Duration) -> Self {
         Connecting {
-            connection: Some(connection),
+            state: Some(state),
             timeout: Delay::new(timeout),
         }
     }
 }
 
 impl Future for Connecting {
-    type Output = Result<(PeerId, Muxer), transport::TransportError>;
+    type Output = Result<(PeerId, Connection), transport::TransportError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let connection = self
-            .connection
+        let state = self
+            .state
             .as_mut()
             .expect("Future polled after it has completed");
 
         loop {
-            match connection.poll_event(cx) {
-                Poll::Ready(ConnectionEvent::Connected(peer_id)) => {
-                    let muxer = Muxer::from_connection(self.connection.take().unwrap());
+            match state.poll_event(cx) {
+                Poll::Ready(Event::Connected(peer_id)) => {
+                    let muxer = Connection::new(self.state.take().unwrap());
                     return Poll::Ready(Ok((peer_id, muxer)));
                 }
-                Poll::Ready(ConnectionEvent::ConnectionLost(err)) => {
-                    return Poll::Ready(Err(err.into()))
-                }
-                Poll::Ready(ConnectionEvent::HandshakeDataReady)
-                | Poll::Ready(ConnectionEvent::StreamAvailable)
-                | Poll::Ready(ConnectionEvent::StreamOpened)
-                | Poll::Ready(ConnectionEvent::StreamReadable(_))
-                | Poll::Ready(ConnectionEvent::StreamWritable(_))
-                | Poll::Ready(ConnectionEvent::StreamFinished(_))
-                | Poll::Ready(ConnectionEvent::StreamStopped(_)) => continue,
+                Poll::Ready(Event::ConnectionLost(err)) => return Poll::Ready(Err(err.into())),
+                Poll::Ready(Event::HandshakeDataReady)
+                | Poll::Ready(Event::StreamAvailable)
+                | Poll::Ready(Event::StreamOpened)
+                | Poll::Ready(Event::StreamReadable(_))
+                | Poll::Ready(Event::StreamWritable(_))
+                | Poll::Ready(Event::StreamFinished(_))
+                | Poll::Ready(Event::StreamStopped(_)) => continue,
                 Poll::Pending => {}
             }
+
             match self.timeout.poll_unpin(cx) {
                 Poll::Ready(()) => {
                     return Poll::Ready(Err(transport::TransportError::HandshakeTimedOut))
