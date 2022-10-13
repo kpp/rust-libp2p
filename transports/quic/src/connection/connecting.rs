@@ -20,14 +20,14 @@
 
 use crate::Connection;
 use crate::{connection::Event, connection::State, transport};
-use futures::{prelude::*};
+use futures::prelude::*;
 use futures_timer::Delay;
 use libp2p_core::PeerId;
+use std::time::Duration;
 use std::{
     pin::Pin,
     task::{Context, Poll},
 };
-use std::time::Duration;
 
 /// Future that drives a QUIC connection until is has performed its TLS handshake.
 #[derive(Debug)]
